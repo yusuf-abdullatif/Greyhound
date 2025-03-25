@@ -26,36 +26,33 @@ CELL_PIXELS = WINDOW_SIZE // CELLS
 # =============================================
 class IMUProcessor:
     def __init__(self):
-        self.x = GRID_SIZE / 2  # Start at center
+        self.x = GRID_SIZE / 2
         self.y = GRID_SIZE / 2
-        self.yaw = 0.0
-        self.alpha = 0.98  # Complementary filter constant
+        self.vx = 0.0
+        self.vy = 0.0
         self.last_time = time.time()
 
-        # Calibration offsets (adjust based on your IMU)
-        self.accel_offset = np.array([0, 0, 0])
-        self.gyro_offset = np.array([0, 0, 0])
+        # Velocity damping parameters
+        self.damping = 0.9
+        self.deadzone = 0.1  # m/s² threshold
 
-    def update(self, accel_raw, gyro_raw):
-        # Convert raw data to physical units
-        accel = (np.array(accel_raw) / 16384.0 - self.accel_offset) * 9.81  # m/s²
-        gyro = (np.array(gyro_raw) / 131.0 - self.gyro_offset) * (math.pi / 180)  # rad/s
-
+    def update(self, lin_x, lin_y):
         dt = time.time() - self.last_time
         self.last_time = time.time()
 
-        # Complementary filter for orientation
-        pitch_acc = math.atan2(accel[0], math.sqrt(accel[1] ** 2 + accel[2] ** 2))
-        self.yaw = self.alpha * (self.yaw + gyro[2] * dt) + (1 - self.alpha) * pitch_acc
+        # Apply deadzone to ignore tiny movements
+        if abs(lin_x) < self.deadzone: lin_x = 0
+        if abs(lin_y) < self.deadzone: lin_y = 0
 
-        # Dead reckoning (simplified 2D)
-        ax = accel[0] * math.cos(self.yaw) - accel[2] * math.sin(self.yaw)
-        ay = accel[1]
+        # Update velocity with damping
+        self.vx = self.damping * (self.vx + lin_x * dt)
+        self.vy = self.damping * (self.vy + lin_y * dt)
 
-        self.x += 0.5 * ax * dt ** 2
-        self.y += 0.5 * ay * dt ** 2
+        # Update position
+        self.x += self.vx * dt
+        self.y += self.vy * dt
 
-        return self.x, self.y, math.degrees(self.yaw)
+        return self.x, self.y
 
 
 # =============================================
@@ -112,7 +109,7 @@ class Visualizer:
         self.screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
         self.font = pygame.font.SysFont(None, 24)
 
-    def draw(self, nav, x, y, yaw):
+    def draw(self, nav, x, y):
         self.screen.fill((255, 255, 255))
 
         # Draw grid
@@ -132,12 +129,12 @@ class Visualizer:
         pygame.draw.circle(self.screen, (255, 0, 0),
                            (rx * CELL_PIXELS, ry * CELL_PIXELS), 10)
 
-        # Draw heading arrow
-        arrow_len = 30
-        end_x = rx * CELL_PIXELS + arrow_len * math.cos(math.radians(yaw))
-        end_y = ry * CELL_PIXELS + arrow_len * math.sin(math.radians(yaw))
-        pygame.draw.line(self.screen, (0, 0, 255),
-                         (rx * CELL_PIXELS, ry * CELL_PIXELS), (end_x, end_y), 3)
+        # # Draw heading arrow
+        # arrow_len = 30
+        # end_x = rx * CELL_PIXELS + arrow_len * math.cos(math.radians(yaw))
+        # end_y = ry * CELL_PIXELS + arrow_len * math.sin(math.radians(yaw))
+        # pygame.draw.line(self.screen, (0, 0, 255),
+        #                  (rx * CELL_PIXELS, ry * CELL_PIXELS), (end_x, end_y), 3)
 
         # Draw path
         if nav.path:
@@ -165,25 +162,21 @@ if __name__ == "__main__":
             line = ser.readline().decode().strip()
             if line:
                 try:
-                    data = json.loads(line)
-                    x, y, yaw = imu.update(
-                        [data['ax'], data['ay'], data['az']],
-                        [data['gx'], data['gy'], data['gz']]
-                    )
+                    try:
+                        data = json.loads(line)
+                        x, y = imu.update(data['lin_x'], data['lin_y'])
 
-                    # Update mapping
-                    nav.update_grid(x, y)
+                        # Update mapping and path planning
+                        nav.update_grid(x, y)
+                        if time.time() % 2 < 0.1:
+                            current_grid = nav.world_to_grid(x, y)
+                            nav.path = nav.astar(current_grid, target_grid)
 
-                    # Plan path every 2 seconds
-                    if time.time() % 2 < 0.1:
-                        current_grid = nav.world_to_grid(x, y)
-                        nav.path = nav.astar(current_grid, target_grid)
-
-                    # Visualize
-                    viz.draw(nav, x, y, yaw)
-
-                    # Print status
-                    print(f"Position: ({x:.2f}, {y:.2f}) | Yaw: {yaw:.1f}°")
+                        # Visualize
+                        viz.draw(nav, x, y)
+                        print(f"X: {x:.2f}m | Y: {y:.2f}m")
+                    except json.JSONDecodeError:
+                        pass
 
                 except json.JSONDecodeError:
                     pass
